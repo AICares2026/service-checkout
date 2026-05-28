@@ -1,0 +1,66 @@
+# Skill: Go Module Tidying (`go mod tidy`)
+
+## Objective
+Run `go mod tidy` in every Go module found in the repository to ensure `go.mod` and `go.sum` files are consistent — removing unused dependencies, adding missing ones, and pruning stale checksums.
+
+---
+
+## Step 1: Discover All Go Modules
+
+Walk the repository directory tree and collect every directory containing a `go.mod` file. Each such directory is a module root and must be processed independently.
+
+- Include nested modules (e.g., `tools/go.mod`, `internal/plugin/go.mod`).
+- Do **not** skip modules in subdirectories even if a parent directory also has a `go.mod`.
+- Record the full path to each module root.
+- Exclude any module rooted inside a `vendor/` directory (e.g., `vendor/github.com/foo/bar/go.mod`). These are vendored copies and must never be modified.
+- Snapshot the exact byte contents of `go.mod` and `go.sum` for each module before any changes, so you can diff or revert precisely later.
+
+---
+
+## Step 2: Precondition Checks (Per Module)
+
+Before running `go mod tidy` on a module, verify all of the following. If any check fails, skip that module and log a warning with the specific reason — do not attempt to fix it.
+
+1. **Go toolchain is available**: `go version` exits with code 0. Log the version string; if the `go.mod` specifies a `go` version directive higher than the installed toolchain (e.g., `go 1.22` but `go version` reports `go1.21`), skip and warn — `go mod tidy` may silently produce incorrect results.
+
+2. **The `go.mod` file is parseable**: It must contain a valid `module` directive and a `go` version directive. If either is missing or malformed, skip the module.
+
+3. **No uncommitted merge conflicts**: Check that `go.mod` and `go.sum` do not contain conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). If found, skip.
+
+4. **Vendor directory consideration**: If a `vendor/` directory exists alongside `go.mod`, plan to run `go mod vendor` after `go mod tidy` to keep the vendor directory consistent. Log this plan explicitly before executing. Note: if `go.mod` contains a `go 1.14` or higher directive and a `vendor/` directory is present, Go commands may enforce vendor mode automatically — account for this by passing `-mod=mod` to `go mod tidy` only when needed (i.e., when tidy would otherwise refuse to modify `go.mod` due to vendor mode enforcement). Do not pass `-mod=mod` unless this condition is detected.
+
+5. **Network and proxy environment**: Run with `-e` flag (`go mod tidy -e`) to tolerate transient download errors, allowing tidy to complete partially rather than fail entirely. Before invoking, collect the effective values of `GONOSUMCHECK`, `GOFLAGS`, `GONOSUMDB`, `GOPROXY`, `GONOSUMDB`, `GOPATH`, and `GOMODCACHE` from: the current process environment, any `.env` file in the module root or repository root, and any `Makefile` or CI config that exports them via `export VAR=`. Pass these through when invoking `go mod tidy`. Do not override or unset any of these variables.
+
+6. **`go.sum` is not absent when dependencies exist**: If `go.mod` lists `require` directives but no `go.sum` file exists, note this explicitly in the log before running — `go mod tidy` will create one, which is expected and acceptable.
+
+---
+
+## Step 3: Execute `go mod tidy`
+
+For each module that passed preconditions:
+
+```
+cd <module-root>
+go mod tidy -e
+```
+
+If vendor mode enforcement was detected in Step 2 precondition 4, use:
+
+```
+go mod tidy -e -mod=mod
+```
+
+If a `vendor/` directory is present, additionally run:
+
+```
+go mod vendor
+```
+
+Capture stdout, stderr, and exit code for every command. Do not suppress any output.
+
+---
+
+## Step 4: Evaluate Results
+
+**Success (exit code 0):**
+- Compare current `go.mod` and `
