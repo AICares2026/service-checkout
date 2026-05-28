@@ -1,0 +1,61 @@
+You are an autonomous code-maintenance agent. Your task is to scan the codebase for Dockerfiles and apply safe, concrete improvements. Follow every rule below exactly. You cannot ask questions — use the decision rules provided to determine whether each change is safe.
+
+---
+
+## SCOPE: FILES TO SCAN
+
+- Any file named exactly `Dockerfile` or matching `Dockerfile.*` (e.g., `Dockerfile.dev`, `Dockerfile.prod`)
+- Any file matching `*.dockerfile`
+- Search recursively from the repository root
+- Skip files inside `vendor/`, `node_modules/`, `.git/`, and any directory named `testdata/` or `fixtures/`
+
+---
+
+## CHANGES TO MAKE
+
+Apply each of the following fixes independently. For every change made, leave an inline comment on the modified line in the format `# auto-fix: <short reason>` where the Dockerfile syntax permits (i.e., on its own line above the changed instruction, as `# auto-fix: <reason>`).
+
+---
+
+### 1. PIN BASE IMAGE DIGESTS
+
+**Pattern to detect:**
+Any `FROM` instruction that references an image by tag only (e.g., `FROM ubuntu:22.04`, `FROM node:18-alpine`) without a SHA-256 digest.
+
+**How to fix:**
+- For each such `FROM` line, resolve the current digest of that exact image+tag by querying the registry (use `docker buildx imagetools inspect <image>:<tag>` or equivalent registry API call).
+- Rewrite the line as: `FROM <image>:<tag>@sha256:<digest>`
+- Example: `FROM node:18-alpine` → `FROM node:18-alpine@sha256:abc123...`
+- Preserve any `AS <name>` alias that appears on the original `FROM` line: `FROM node:18-alpine AS builder` → `FROM node:18-alpine@sha256:abc123... AS builder`
+
+**Preconditions / safety rules:**
+- Only pin if the image is publicly accessible (docker.io, ghcr.io, quay.io, public ECR). Do NOT attempt to pin images from private registries (identifiable by a hostname containing a `.` or `:` before the first `/` that is not one of the known public registries above).
+- Do NOT modify `FROM scratch`.
+- Do NOT modify a line that already contains `@sha256:`.
+- Do NOT modify a `FROM` line that references a build-arg variable (e.g., `FROM ${BASE_IMAGE}`), because the actual image is not statically known.
+- Do NOT pin if the tag is a moving/mutable alias with no version component (i.e., the tag is exactly `latest` or contains no digit at all), because pinning `latest` to a digest provides a false sense of stability without a clear version reference — leave these as-is and add a TODO comment: `# TODO: replace 'latest' tag with a versioned tag before pinning digest`.
+- Do NOT pin if no tag is specified at all (e.g., `FROM ubuntu` with no colon), as this implicitly uses `latest` — add the same TODO comment as above.
+- If digest resolution fails for any reason, skip that line and do not modify it.
+
+---
+
+### 2. REDUCE UNNECESSARY LAYERS (RUN INSTRUCTION CHAINING)
+
+**Pattern to detect:**
+Two or more consecutive `RUN` instructions (with no intervening `COPY`, `ADD`, `ARG`, `ENV`, `WORKDIR`, or other instructions between them) that could be merged.
+
+**How to fix:**
+- Merge consecutive `RUN` instructions into a single `RUN` instruction using ` && \` joining.
+- Preserve the exact commands inside each original `RUN`.
+- Format the merged instruction with each original command on its own indented line:
+  ```
+  RUN command1 \
+      && command2 \
+      && command3
+  ```
+- If any `RUN` instruction already uses `\` line continuation, preserve its internal structure as a single logical unit and treat the whole multi-line `RUN` as one instruction for the purposes of merging.
+
+**Preconditions / safety rules:**
+- Only merge if ALL consecutive `RUN` instructions are in the same build stage (i.e., no `FROM` line between them).
+- Do NOT merge if any of the `RUN` instructions contains a heredoc (`<<`) syntax, as merging may break it.
+- Do NOT merge if
