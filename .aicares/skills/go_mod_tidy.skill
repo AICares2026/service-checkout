@@ -1,0 +1,58 @@
+## Skill: Go Module Tidying (`go mod tidy`)
+
+### Objective
+Run `go mod tidy` in every applicable Go module within the repository to ensure `go.mod` and `go.sum` files are consistent — removing unused dependencies, adding missing ones, and aligning checksums.
+
+---
+
+### What to Look For
+
+Scan the entire repository for every `go.mod` file. Each `go.mod` file marks the root of a Go module. For each one found, the module may be in an inconsistent state if any of the following are true:
+
+- `go.sum` is missing entries for packages that are imported in `.go` source files
+- `go.sum` contains entries for packages no longer imported anywhere in the module
+- `go.mod` lists `require` directives for modules not transitively needed
+- `go.mod` is missing `require` directives for packages that are imported in source files
+- Indirect dependencies are not properly annotated with the `// indirect` comment
+- The `go` directive version in `go.mod` is present (do not change it manually — `go mod tidy` may update it automatically; this is acceptable only if the installed toolchain version is equal to or newer than the version already declared in the `go` directive)
+
+---
+
+### Preconditions — Check Before Processing Any Module
+
+Before processing **any** module, verify the following. If any precondition fails, **skip that module entirely**, log the reason, and continue to the next.
+
+1. **Go toolchain is available**: `go version` must succeed and return a parseable version string.
+
+2. **Toolchain version is sufficient**: Parse the `go` directive from the module's `go.mod` (e.g. `go 1.21`). If the installed toolchain version is older than the declared `go` directive version, skip the module — `go mod tidy` may silently corrupt the file or fail in confusing ways.
+
+3. **No unresolvable `replace` directives**: Parse every `replace` directive in `go.mod`. If any directive replaces a module with a local filesystem path (i.e., the replacement starts with `./`, `../`, or an absolute path), verify that the path exists on the current filesystem. If it does not exist, skip the module.
+
+4. **No `vendor/` directory present**: If the module root contains a `vendor/` directory, skip the module entirely. Vendored modules require a separate, intentional workflow and must not be modified unsupervised.
+
+5. **Not inside an excluded directory**: Skip any `go.mod` that is located inside a directory named `testdata`, `_testdata`, `fixtures`, or `third_party` at any depth, or that is more than one directory level inside a directory with any of those names. Also skip `go.mod` files inside directories named `_examples` that contain no CI configuration (no `.github/`, no `Makefile`, no CI YAML at the repo root referencing that path).
+
+6. **Network access is available** (if required): If the module references any dependencies not already in the local module cache, `go mod tidy` will attempt to download them. If the environment is known to be network-isolated (e.g., `GOFLAGS=-mod=off` or `GONOSUMCHECK` is set in a way that suggests isolation), log a warning. Do not skip solely on this basis, but capture any download failures clearly.
+
+---
+
+### How to Fix
+
+For each `go.mod` file that passes all preconditions:
+
+1. **Determine the module root directory** — it is the directory containing the `go.mod` file.
+
+2. **Record the pre-run state** — capture the current content of `go.mod` and `go.sum` so they can be restored exactly if a later step fails.
+
+3. **Run `go mod tidy`** in that directory:
+   ```
+   cd <module-root> && go mod tidy
+   ```
+   This single command handles all of the following automatically:
+   - Adds missing `require` entries to `go.mod`
+   - Removes unused `require` entries from `go.mod`
+   - Annotates indirect dependencies with `// indirect`
+   - Regenerates `go.sum` with correct checksums for all required modules
+   - Removes stale entries from `go.sum`
+
+   If `go mod tidy` exits with a non-zero code, **restore `go.mod` and `go.sum` to their pre-run state**, log

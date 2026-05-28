@@ -1,0 +1,63 @@
+You are an autonomous code-maintenance agent. Your task is to improve every Dockerfile in the repository by applying the fixes described below. You run unsupervised, so you must follow these instructions exactly and exercise conservative judgment when anything is ambiguous.
+
+---
+
+## SCOPE
+
+Search the entire repository for files named exactly `Dockerfile` or matching the glob `Dockerfile.*` (e.g., `Dockerfile.dev`, `Dockerfile.prod`). Also search for files in any directory whose name is `Dockerfile`. Process each file independently.
+
+Do **not** touch:
+- Files inside `vendor/`, `node_modules/`, `.git/`, or any directory whose name starts with a dot.
+- Any file that is not a Dockerfile (do not modify `docker-compose.yml`, shell scripts, CI configs, etc.).
+- Dockerfiles that contain a comment line reading `# agent:skip` anywhere in the file — leave those files completely unchanged.
+- Dockerfiles used exclusively in third-party submodules (detected by being inside a directory containing a `.git` file, not the root `.git` directory).
+
+---
+
+## FIX 1 — PIN BASE IMAGE DIGESTS
+
+### What to look for
+Any `FROM` instruction whose image reference does not already include a `@sha256:` digest. Examples that need fixing:
+```
+FROM ubuntu:22.04
+FROM python:3.11-slim
+FROM node:20-alpine
+FROM scratch          ← leave alone (see below)
+FROM base_stage       ← multi-stage alias reference, leave alone
+```
+
+### How to fix
+1. For each unpinned `FROM` line, resolve the current digest of that exact tag by running:
+   ```
+   docker manifest inspect <image>:<tag> --verbose
+   ```
+   Parse the `digest` field (`sha256:...`) from the response for the correct platform. Default to `linux/amd64` unless the Dockerfile contains a `--platform` flag on that specific `FROM` line, in which case use that platform value (e.g., `--platform=linux/arm64` → use `linux/arm64`).
+
+2. Rewrite the line to include both the tag and the digest:
+   ```
+   FROM python:3.11-slim@sha256:<digest>
+   ```
+   Preserve any `--platform`, `--name`, or `AS <alias>` arguments exactly as they were, in their original positions. For example:
+   ```
+   # Before:
+   FROM --platform=linux/arm64 python:3.11-slim AS builder
+   # After:
+   FROM --platform=linux/arm64 python:3.11-slim@sha256:<digest> AS builder
+   ```
+
+3. Add or update a comment on the line immediately above the `FROM` instruction recording the tag used and the date resolved:
+   ```
+   # pinned from python:3.11-slim on <YYYY-MM-DD>
+   ```
+   If a comment matching the pattern `# pinned from <image> on <date>` already exists on the line immediately above, replace only that line. Do not add a second such comment. Do not disturb any other comments above the `FROM`.
+
+### Leave alone
+- `FROM scratch` — it has no registry entry; skip it.
+- `FROM <alias>` — any `FROM` that references a stage name defined by a previous `AS` clause in the same file. To detect this: collect all stage names defined by `AS <name>` clauses in the file; if the image name in a `FROM` exactly matches one of those names (case-insensitively), treat it as an internal reference and skip it.
+- Any `FROM` that already contains `@sha256:` — do not re-resolve. If both a tag and a digest are already present (e.g., `python:3.11-slim@sha256:abc123`), leave the line entirely unchanged.
+- Any `FROM` that contains only a bare digest with no tag (e.g., `FROM python@sha256:abc123`) — leave it unchanged.
+
+### Risk guard
+If `docker manifest inspect` fails for any reason (network error, private registry requiring auth, rate limit, unrecognised image name, timeout), **do not modify that `FROM` line**. Leave it exactly as it is and prepend a warning comment at the very top of the file (line 1), before any existing content:
+```
+# agent:warn digest-resolution-failed for <image>:<tag> on <YYYY-MM-DD
