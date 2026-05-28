@@ -1,0 +1,58 @@
+# Skill: Go Module Tidying (`go mod tidy`)
+
+## Objective
+Run `go mod tidy` in every Go module found in the repository to ensure `go.mod` and `go.sum` are consistent with the actual source code — removing unused dependencies and adding any that are missing.
+
+---
+
+## Step 1: Discover All Go Modules
+
+Scan the entire repository for files named exactly `go.mod`. Each directory containing a `go.mod` file is an independent Go module and must be processed separately.
+
+- Recurse into subdirectories, including nested modules.
+- Collect the absolute path of every directory containing a `go.mod` file.
+- Ignore any `go.mod` files found inside `vendor/` directories — these are copied dependency sources, not independent modules to be managed.
+- If no `go.mod` files are found, stop — there is nothing to do.
+
+---
+
+## Step 2: Precondition Checks (Per Module)
+
+Before running `go mod tidy` in a module directory, verify all of the following. If any check fails for a module, skip that module entirely and log the reason — do not attempt to fix it.
+
+1. **Go toolchain is available**: `go version` must succeed. If the Go binary is not on PATH, abort all processing immediately.
+
+2. **Go toolchain version matches the module's `go` directive**: Read the `go` directive from `go.mod` (e.g., `go 1.21`). If the installed Go toolchain's major.minor version is *older* than the version declared in `go.mod`, skip this module — `go mod tidy` may silently produce incorrect results or fail in confusing ways. Log the mismatch (e.g., "module requires go 1.21, installed is go 1.19").
+
+3. **The `go.mod` file is parseable**: It must contain a valid `module` directive and a `go` directive specifying a language version. If the file is malformed or truncated, skip this module.
+
+4. **No active VCS conflict markers**: The `go.mod` and `go.sum` files must not contain lines beginning with `<<<<<<<`, `=======`, or `>>>>>>>`. If conflict markers are present, skip this module.
+
+5. **No `replace` directives pointing to absolute local paths outside the repository**: If `go.mod` contains a `replace` directive pointing to an absolute path (e.g., `replace example.com/foo => /home/user/foo`), skip this module — such replacements are environment-specific and `go mod tidy` may fail or produce incorrect results.
+
+6. **No `replace` directives pointing to a local relative path that does not exist**: Check that relative replace targets (e.g., `=> ../sibling`) resolve to an existing directory. If the target directory is missing, skip this module.
+
+7. **The module is not excluded by repository configuration**: Check for a file named `.gomodtidy-ignore` or `.gomodtidy-skip` in the module's root directory or the repository root. If present, read it as a newline-delimited list of module paths (matching the `module` directive in `go.mod`). If the current module's path appears in any such file, skip it and log that it was explicitly excluded.
+
+8. **Vendoring mode detection**: If `go.mod` contains `go 1.14` or later AND a `vendor/` directory exists AND a `vendor/modules.txt` file is present, the project is using vendoring. Flag this module for the extended vendored flow in Step 3b. This is not a reason to skip — it changes how the module is processed.
+
+---
+
+## Step 3: Run `go mod tidy` (Per Module)
+
+For each module that passed all precondition checks:
+
+### 3a. Standard Module (No Vendor Directory)
+
+Execute the following command in the module's root directory:
+
+```
+go mod tidy
+```
+
+- Capture stdout and stderr.
+- If the command exits with a non-zero status, log the full error output and mark the module as failed. Do not stage any changes for this module.
+- If the command succeeds, both `go.mod` and `go.sum` may have been modified on disk.
+
+**Common failure patterns to log clearly** (do not attempt to fix these automatically):
+- `no required module provides package ...` — a package is imported in source but its module is not in `go.mod` and cannot be resolved. This requires human

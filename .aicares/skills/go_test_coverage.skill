@@ -1,0 +1,61 @@
+You are an autonomous code-maintenance agent. Your task is to identify exported functions that lack test coverage and generate minimal table-driven test stubs for them. Follow these instructions exactly.
+
+---
+
+## WHAT TO LOOK FOR
+
+Scan every `.go` file in the repository (excluding vendored, generated, and test files themselves) for exported functions and methods — those whose names begin with an uppercase letter.
+
+### Files to exclude
+Skip any file that matches one or more of the following:
+- Path contains `/vendor/`
+- Path contains `/testdata/`
+- Filename ends in `_test.go`
+- First line or an early comment contains `// Code generated` (standard Go generated-file marker)
+- File is in a directory named `internal/generated`, `gen`, or similar generation output directories recognizable by a `//go:generate` header or `.pb.go` / `_gen.go` filename suffix
+
+### What counts as "exported"
+- Top-level functions: `func FuncName(...) ...` where `FuncName` begins with an uppercase letter
+- Methods on exported types: `func (r ReceiverType) MethodName(...) ...` and `func (r *ReceiverType) MethodName(...) ...` where `MethodName` begins with an uppercase letter
+- Include generic functions and methods: `func FuncName[T any](...)` — treat type parameters as additional struct fields named `zero T` with a `// TODO` comment in the table row
+
+A function or method is considered **untested** if ALL of the following are true:
+
+1. No `_test.go` file in the same package contains a function named `Test<FunctionName>` or `Test<TypeName>_<MethodName>` where the test function name is an exact match or a prefix match followed by an underscore or digit (e.g., `TestFuncName_errorCase` covers `FuncName`).
+2. The function is not exclusively called by other already-tested functions in the same package (i.e., it is not transitively covered by an obvious direct test). **Conservatively:** if you cannot determine call coverage with certainty, treat the function as untested rather than skipping it.
+3. The function does not satisfy a condition in the LEAVE ALONE section below.
+
+---
+
+## LEAVE ALONE — DO NOT GENERATE STUBS FOR THESE
+
+Do not generate stubs for:
+
+- **`String() string` methods** on any type — these satisfy `fmt.Stringer` and are typically covered implicitly.
+- **`Error() string` methods** — these satisfy the `error` interface.
+- **`MarshalJSON`, `UnmarshalJSON`, `MarshalText`, `UnmarshalText`, `MarshalBinary`, `UnmarshalBinary`** — standard encoding interface methods.
+- **`ServeHTTP(ResponseWriter, *Request)`** — HTTP handler interface method.
+- **Methods whose receiver type is unexported** — e.g., `func (r myType) Exported(...)` where `myType` is unexported. These cannot be instantiated directly in tests.
+- **Functions or methods where every parameter type and every return type is unexported** and originates from a different package (cannot be constructed in a test).
+- **`init()` functions** — not exported and not directly testable.
+- **Interface satisfaction methods where the interface has no concrete exported constructor or test harness reachable from the test file** — leave a `// TODO: requires harness` comment in place of a stub if you flag this case at all.
+- **Deprecated functions** marked with a `// Deprecated:` comment directly above the declaration.
+
+If you are uncertain whether a function falls into a leave-alone category, err on the side of **not** generating a stub and instead emit a structured comment:
+
+```go
+// AGENT-SKIP: <FunctionName> — reason: <one-line reason>
+```
+
+Place this comment at the top of the relevant test file section, not in source files.
+
+---
+
+## HOW TO FIX EACH ISSUE
+
+For each untested exported function or method found, generate a table-driven test stub in the appropriate `_test.go` file. Follow this process precisely.
+
+### Step 1 — Determine the target test file
+
+- If a `<filename>_test.go` already exists in the same directory (matching the source filename exactly, e.g., `foo.go` → `foo_test.go`), append to it.
+-

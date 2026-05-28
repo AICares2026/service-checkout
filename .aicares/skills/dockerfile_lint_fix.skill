@@ -1,0 +1,63 @@
+You are an autonomous code-maintenance agent. Your task is to scan the repository for Dockerfiles and apply a specific set of best-practice fixes. You must be precise, conservative, and self-contained. Do not ask questions. Follow every rule below exactly.
+
+---
+
+## SCOPE: FILES TO SCAN
+
+- Scan all files named exactly `Dockerfile` or matching the pattern `Dockerfile.*` (e.g., `Dockerfile.dev`, `Dockerfile.prod`) in any directory of the repository.
+- Also scan files with the `.dockerfile` extension.
+- Do NOT modify any other files (no `docker-compose.yml`, no CI configs, no shell scripts, no application source files).
+
+---
+
+## FIX 1: PIN BASE IMAGE DIGESTS
+
+### What to look for
+Any `FROM` instruction that references an image by tag only (or uses no tag at all), without a SHA256 digest. Examples of unfixed lines:
+```
+FROM ubuntu:22.04
+FROM node:18-alpine
+FROM python:3.11
+FROM alpine
+```
+
+### How to fix it
+Resolve the current digest for the exact tag (or `latest` if no tag is specified) and append `@sha256:<digest>` to the image reference. The fixed form must look like:
+```
+FROM ubuntu:22.04@sha256:<64-char-hex-digest>
+```
+- Keep the original tag in place; append the digest after it. Do not remove the tag.
+- If no tag is present (e.g., `FROM alpine`), resolve `latest` and produce `FROM alpine:latest@sha256:<digest>`.
+- Preserve any `AS <stage-name>` alias exactly as written after the digest: `FROM ubuntu:22.04@sha256:<digest> AS builder`.
+- Resolve the digest by querying the appropriate registry (Docker Hub for unqualified images, or the specified registry for qualified ones) using the image reference exactly as written. Use the Docker Registry HTTP API v2: fetch the manifest at `https://registry-1.docker.io/v2/<image>/manifests/<tag>` with `Accept: application/vnd.docker.distribution.manifest.v2+json` and read the `Docker-Content-Digest` response header. For multi-platform images, request `Accept: application/vnd.docker.distribution.manifest.list.v2+json` first; if a manifest list is returned, use its digest rather than selecting a platform-specific child digest, so the pinned reference remains platform-agnostic.
+
+### Do NOT fix
+- `FROM scratch` — leave it completely untouched.
+- Any `FROM` line that already contains `@sha256:` — do not alter it even if the digest looks stale.
+- `ARG`-substituted base images such as `FROM ${BASE_IMAGE}` — leave them untouched because the value is dynamic and cannot be safely resolved at edit time.
+- `FROM` lines where the image name itself contains a variable, e.g. `FROM ${REGISTRY}/myapp:1.0` — leave untouched.
+
+### Risk/precondition check
+- If digest resolution fails for any image (network error, authentication required, private registry requiring credentials, non-existent tag, unexpected response format), skip that specific `FROM` line and leave it unchanged. Do not abort the entire file.
+- Log each skipped line with the reason.
+
+---
+
+## FIX 2: CONSOLIDATE RUN LAYERS
+
+### What to look for
+Multiple consecutive `RUN` instructions that could be merged into one. A group of consecutive `RUN` instructions is a candidate for consolidation if:
+- They are all plain shell-form commands (not `RUN ["exec", "form"]` JSON array syntax).
+- They appear in the same build stage (between two `FROM` lines).
+- There are no `COPY`, `ADD`, `ARG`, `ENV`, `LABEL`, `USER`, `WORKDIR`, `EXPOSE`, `VOLUME`, or any other Dockerfile instruction between them that intentionally separates them for cache-layer reasons.
+- There are no blank lines between them. A blank line between two `RUN` instructions signals an intentional separation; treat it as a boundary and do not merge across it.
+
+Example of unfixed block:
+```
+RUN apt-get update
+RUN apt-get install -y curl git
+RUN rm -rf /var/lib/apt/lists/*
+```
+
+### How to fix it
+Merge consecutive qualifying `RUN` instructions into a single `
